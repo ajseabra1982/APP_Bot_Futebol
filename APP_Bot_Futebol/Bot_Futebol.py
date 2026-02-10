@@ -3,11 +3,11 @@ import pandas as pd
 import numpy as np
 from scipy.stats import poisson
 
-st.set_page_config(page_title="PRO Football Predictor 2026", layout="wide")
+st.set_page_config(page_title="Ultra Predictor Bot 2026", layout="wide")
 
-# --- DICIONÁRIO DE LIGAS ATUALIZADO ---
+# --- BANCO DE DADOS ---
 LIGAS = {
-    "Brasileirão Série A (Brasil)": "BRA",
+    "Brasileirão Série A": "BRA",
     "Premier League (Inglaterra)": "E0",
     "La Liga (Espanha)": "SP1",
     "Bundesliga (Alemanha)": "D1",
@@ -17,104 +17,108 @@ LIGAS = {
 
 @st.cache_data(ttl=3600)
 def carregar_dados(liga_code):
-    if liga_code == "BRA":
-        # Fonte alternativa para o Brasileirão (Dados de 2025/2026)
-        url = "https://www.football-data.co.uk/new/BRA.csv"
-    else:
-        url = f"https://www.football-data.co.uk/mmz4281/2526/{liga_code}.csv"
-    
+    url = f"https://www.football-data.co.uk/new/BRA.csv" if liga_code == "BRA" else f"https://www.football-data.co.uk/mmz4281/2526/{liga_code}.csv"
     try:
         df = pd.read_csv(url)
-        # Padronização de colunas
-        cols_map = {'Home': 'HomeTeam', 'Away': 'AwayTeam', 'HG': 'FTHG', 'AG': 'FTAG'}
+        # Padronização universal para o bot
+        cols_map = {
+            'Home': 'HomeTeam', 'Away': 'AwayTeam', 
+            'HG': 'FTHG', 'AG': 'FTAG', 
+            'HHG': 'HTHG', 'HAG': 'HTAG',
+            'HTHG': 'HTHG', 'HTAG': 'HTAG'
+        }
         df = df.rename(columns=cols_map)
         return df.dropna(subset=['HomeTeam', 'AwayTeam', 'FTHG', 'FTAG'])
     except:
-        st.error(f"Erro ao carregar dados da liga {liga_code}")
         return pd.DataFrame()
 
-def calcular_estatisticas(df, home_team, away_team):
-    # Estatística Pura: Força Relativa
-    avg_home_g = df['FTHG'].mean()
-    avg_away_g = df['FTAG'].mean()
+# --- MOTOR ESTATÍSTICO ---
+def analisar_partida(df, t_casa, t_fora):
+    avg_h = df['FTHG'].mean()
+    avg_a = df['FTAG'].mean()
+    
+    # Expectativa Full-Time (FT)
+    exp_h = (df[df['HomeTeam'] == t_casa]['FTHG'].mean() / avg_h) * (df[df['AwayTeam'] == t_fora]['FTHG'].mean() / avg_h) * avg_h
+    exp_a = (df[df['AwayTeam'] == t_fora]['FTAG'].mean() / avg_a) * (df[df['HomeTeam'] == t_casa]['FTAG'].mean() / avg_a) * avg_a
+    
+    # Matriz Poisson FT
+    p_h = [poisson.pmf(i, exp_h) for i in range(10)]
+    p_a = [poisson.pmf(i, exp_a) for i in range(10)]
+    m = np.outer(p_h, p_a)
 
-    # Força Mandante
-    atq_h = df[df['HomeTeam'] == home_team]['FTHG'].mean() / avg_home_g
-    def_h = df[df['HomeTeam'] == home_team]['FTAG'].mean() / avg_away_g
-
-    # Força Visitante
-    atq_a = df[df['AwayTeam'] == away_team]['FTAG'].mean() / avg_away_g
-    def_a = df[df['AwayTeam'] == away_team]['FTHG'].mean() / avg_home_g
-
-    # Expectativa de Gols (Poisson Lambda)
-    exp_h = atq_h * def_a * avg_home_g
-    exp_a = atq_a * def_h * avg_away_g
-
-    # Probabilidades
-    max_g = 10
-    prob_h = [poisson.pmf(i, exp_h) for i in range(max_g)]
-    prob_a = [poisson.pmf(i, exp_a) for i in range(max_g)]
-    matriz = np.outer(prob_h, prob_a)
+    # Expectativa Half-Time (HT) - Estimada em 45% da média FT
+    exp_h_ht = exp_h * 0.45
+    exp_a_ht = exp_a * 0.45
 
     return {
-        "win_h": np.sum(np.triu(matriz, 1).T),
-        "draw": np.sum(np.diag(matriz)),
-        "win_a": np.sum(np.tril(matriz, -1).T),
+        "H": np.sum(np.triu(m, 1).T),
+        "D": np.sum(np.diag(m)),
+        "A": np.sum(np.tril(m, -1).T),
+        "O15": 1 - (m[0,0] + m[0,1] + m[1,0]),
+        "O25": 1 - np.sum([m[i,j] for i in range(3) for j in range(3) if i+j <= 2]),
+        "HT05": 1 - (poisson.pmf(0, exp_h_ht) * poisson.pmf(0, exp_a_ht)),
         "exp_h": exp_h,
-        "exp_a": exp_a,
-        "over_15": 1 - (matriz[0,0] + matriz[0,1] + matriz[1,0]),
-        "over_25": 1 - np.sum([matriz[i,j] for i in range(3) for j in range(3) if i+j <= 2])
+        "exp_a": exp_a
     }
 
 # --- INTERFACE ---
-st.title("⚽ Predictor Bot: Global & Brasil")
-st.markdown("Análise estatística baseada em **Distribuição de Poisson** e **Força Relativa**.")
+st.title("⚽ Ultra Predictor: Multi-Mercados & Histórico")
 
-# Sidebar
-liga_nome = st.sidebar.selectbox("Selecione a Liga", list(LIGAS.keys()))
-df_liga = carregar_dados(LIGAS[liga_nome])
+with st.expander("📖 MANUAL RÁPIDO"):
+    st.write("1. Escolha os times. 2. Insira as Odds da sua casa na barra lateral. 3. Analise o EV Verde.")
+
+liga_sel = st.sidebar.selectbox("Liga", list(LIGAS.keys()))
+df_liga = carregar_dados(LIGAS[liga_sel])
 
 if not df_liga.empty:
-    # Filtro de Times
     times = sorted(df_liga['HomeTeam'].unique())
-    col_t1, col_t2 = st.columns(2)
-    with col_t1: t_casa = st.selectbox("Mandante", times, index=0)
-    with col_t2: t_fora = st.selectbox("Visitante", times, index=1)
+    col1, col2 = st.columns(2)
+    t1 = col1.selectbox("Mandante", times, index=0)
+    t2 = col2.selectbox("Visitante", times, index=1)
+    
+    st.sidebar.header("💰 Odds da Casa")
+    o_h = st.sidebar.number_input("Odd Casa (1)", 1.0, step=0.01)
+    o_d = st.sidebar.number_input("Odd Empate (X)", 1.0, step=0.01)
+    o_a = st.sidebar.number_input("Odd Fora (2)", 1.0, step=0.01)
+    st.sidebar.divider()
+    o_ht = st.sidebar.number_input("Odd Over 0.5 HT", 1.0, step=0.01)
+    o_15 = st.sidebar.number_input("Odd Over 1.5 FT", 1.0, step=0.01)
+    o_25 = st.sidebar.number_input("Odd Over 2.5 FT", 1.0, step=0.01)
 
-    if st.button("ANALISAR CONFRONTO"):
-        res = calcular_estatisticas(df_liga, t_casa, t_fora)
+    if st.button("GERAR ANÁLISE COMPLETA"):
+        res = analisar_partida(df_liga, t1, t2)
         
-        # 1. Resultados Principais
-        st.subheader("🎯 Probabilidades Finais (FT)")
-        m1, m2, m3 = st.columns(3)
-        m1.metric(f"Vitória {t_casa}", f"{res['win_h']:.1%}")
-        m2.metric("Empate", f"{res['draw']:.1%}")
-        m3.metric(f"Vitória {t_fora}", f"{res['win_a']:.1%}")
+        # 1. Expectativa de Gols
+        st.info(f"📊 **Expectativa de Gols:** {t1} {res['exp_h']:.2f} x {res['exp_a']:.2f} {t2}")
+        
+        # 2. Tabela de Valor (EV)
+        st.subheader("🎯 Oportunidades de Mercado")
+        odds_dict = {"H": o_h, "D": o_d, "A": o_a, "HT05": o_ht, "O15": o_15, "O25": o_25}
+        labels = {"H": "Vitória Casa", "D": "Empate", "A": "Vitória Fora", "HT05": "Over 0.5 HT", "O15": "Over 1.5 FT", "O25": "Over 2.5 FT"}
+        
+        tabela_dados = []
+        for chave, texto in labels.items():
+            prob = res[chave]
+            odd_m = round(1/prob, 2)
+            ev = (prob * odds_dict[chave]) - 1
+            tabela_dados.append([texto, f"{prob:.1%}", odd_m, odds_dict[chave], ev])
+            
+        df_final = pd.DataFrame(tabela_dados, columns=["Mercado", "Prob. Bot", "Odd Mínima", "Odd Casa", "EV (Valor)"])
+        
+        def style_ev(v):
+            return f'color: {"green" if v > 0 else "red"}; font-weight: bold'
+        
+        st.table(df_final.style.applymap(style_ev, subset=['EV (Valor)']).format({"EV (Valor)": "{:.2%}"}))
 
-        # 2. Gols e Expectativa
+        # 3. Histórico H2H (Restaurado)
         st.divider()
-        st.subheader("📊 Mercado de Gols")
-        g1, g2, g3 = st.columns(3)
-        g1.write(f"**Expectativa de Gols:**\n{t_casa} {res['exp_h']:.2f} x {res['exp_a']:.2f} {t_fora}")
-        g2.metric("Over 1.5 Gols", f"{res['over_15']:.1%}")
-        g3.metric("Over 2.5 Gols", f"{res['over_25']:.1%}")
-
-        # 3. Análise de Confronto Direto (H2H) - Pura Estatística Histórica
-        st.divider()
-        st.subheader("⚔️ Histórico Recente (H2H)")
-        h2h = df_liga[((df_liga['HomeTeam'] == t_casa) & (df_liga['AwayTeam'] == t_fora)) | 
-                     ((df_liga['HomeTeam'] == t_fora) & (df_liga['AwayTeam'] == t_casa))].tail(5)
+        st.subheader("⚔️ Confrontos Diretos Recentes (H2H)")
+        h2h = df_liga[((df_liga['HomeTeam'] == t1) & (df_liga['AwayTeam'] == t2)) | 
+                     ((df_liga['HomeTeam'] == t2) & (df_liga['AwayTeam'] == t1))].tail(5)
         
         if not h2h.empty:
-            st.table(h2h[['HomeTeam', 'FTHG', 'FTAG', 'AwayTeam']])
+            h2h_view = h2h[['HomeTeam', 'FTHG', 'FTAG', 'AwayTeam']].copy()
+            h2h_view.columns = ['Mandante', 'Gols Casa', 'Gols Fora', 'Visitante']
+            st.table(h2h_view)
         else:
-            st.info("Sem confrontos diretos registrados nesta base de dados.")
-
-        # 4. Verificação de Valor (Comparação com Odds)
-        st.sidebar.header("Calculadora de Valor")
-        odd_casa = st.sidebar.number_input("Odd Casa na Bet", value=1.90)
-        ev = (res['win_h'] * odd_casa) - 1
-        if ev > 0:
-            st.sidebar.success(f"VALOR ENCONTRADO! EV: {ev:.2%}")
-        else:
-            st.sidebar.error(f"SEM VALOR. EV: {ev:.2%}")
+            st.warning("Nenhum histórico recente encontrado para estes times nesta liga.")
